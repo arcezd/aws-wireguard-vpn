@@ -1,0 +1,10 @@
+[
+  {
+    "ParameterKey": "OriginIP",
+    "ParameterValue": "1.2.3.4/32"
+  },
+  {
+    "ParameterKey": "KeyName",
+    "ParameterValue": "YOUR_KEY_NAME"
+  }
+]

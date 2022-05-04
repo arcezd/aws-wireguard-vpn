@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "AWS CloudFormation Sample Template WireguardVPN: WireguardVPN is a vpn server. **WARNING** This template creates an Amazon EC2 instance, an Application Load Balancer and an Amazon RDS database instance. You will be billed for the AWS resources used if you create a stack from this template."
+
+Parameters:
+  LatestAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+  OriginIP:
+    Description: Origin Ip Address
+    Type: String
+    MinLength: "9"
+    MaxLength: "18"
+    Default: "0.0.0.0/0"
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  KeyName:
+    Description: EC2 KeyServer name
+    Type: String
+  InstanceType:
+    Description: VPNServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - a1.medium
+      - a1.large
+      - a1.xlarge
+      - a1.2xlarge
+      - a1.4xlarge
+      - c5.large
+      - c5.xlarge
+      - c5.2xlarge
+      - c5.4xlarge
+      - c5.9xlarge
+      - c5.18xlarge
+      - t2.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+      - m5.12xlarge
+      - m5.24xlarge
+      - r5.large
+      - r5.xlarge
+      - r5.2xlarge
+      - r5.4xlarge
+      - r5.12xlarge
+      - r5.24xlarge
+      - m5a.large
+      - m5a.xlarge
+      - m5a.2xlarge
+      - m5a.4xlarge
+      - m5a.12xlarge
+      - m5a.24xlarge
+      - r5a.large
+      - r5a.xlarge
+      - r5a.2xlarge
+      - r5a.4xlarge
+      - r5a.12xlarge
+      - r5a.24xlarge
+  WireguardPort:
+    Description: Wireguard VPN Port
+    Type: String
+    Default: "51820"
+    AllowedPattern: (\d{4,5})
+    ConstraintDescription: must be a UDP port number from 1000 to 65535.
+
+Resources:
+  VPNServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable Wireguard UDP port
+      SecurityGroupIngress:
+        - IpProtocol: UDP
+          FromPort: !Ref WireguardPort
+          ToPort: !Ref WireguardPort
+          CidrIp:
+            Ref: OriginIP
+  VPNServer:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          wireguard_install:
+            - "install_cfn"
+            - "prepare_dependencies"
+            - "install_wireguard"
+            - "generate_server_keys"
+            - "configure_wireguard"
+            - "configure_wg_services"
+            - "configure_traffic_forwarding"
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.VPNServer.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource VPNServer --configsets wireguard_install --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: "root"
+              group: "root"
+          services:
+            sysvinit:
+              "cfn-hup":
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        prepare_dependencies:
+          commands:
+            01_update_packages:
+              command: sudo yum update -y
+            02_enable_extras:
+              command: sudo amazon-linux-extras install -y epel
+            03_add_wireguard_repo:
+              command: sudo curl -Lo /etc/yum.repos.d/wireguard.repo https://copr.fedorainfracloud.org/coprs/jdoss/wireguard/repo/epel-7/jdoss-wireguard-epel-7.repo
+        install_wireguard:
+          packages:
+            yum:
+              wireguard-dkms: []
+              wireguard-tools: []
+        generate_server_keys:
+          commands:
+            01_create_dir:
+              command: mkdir -p /etc/wireguard/keys
+            02_generate_private_key:
+              command: wg genkey | sudo tee /etc/wireguard/keys/server.key
+            03_generate_public_key:
+              command: cat /etc/wireguard/keys/server.key | wg pubkey | tee /etc/wireguard/keys/server.key.pub
+              test: test ! -e /etc/wireguard/keys/server.key.pub
+        configure_wireguard:
+          files:
+            /etc/wireguard/wg0.conf:
+              content: !Sub |
+                [Interface]
+                Address = 10.0.0.1/24
+                ListenPort = ${WireguardPort}
+                PrivateKey = [WG_PRIVATE_KEY]
+                PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o [ETH_INTERFACE] -j MASQUERADE
+                PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o [ETH_INTERFACE] -j MASQUERADE
+                SaveConfig = true
+              mode: "000600"
+          commands:
+            01_configure_private_key:
+              command: sed -i "s/\[WG_PRIVATE_KEY\]/$(cat /etc/wireguard/keys/server.key)/g" /etc/wireguard/wg0.conf
+            02_configure_interface:
+              command: sed -i "s/\[ETH_INTERFACE\]/$(ip -o -4 route show to default | awk '{print $5}')/g" /etc/wireguard/wg0.conf
+            03_configure_permissions:
+              command: chmod 600 /etc/wireguard/wg0.conf /etc/wireguard/keys/server.key
+        configure_wg_services:
+          commands:
+            01_start_wg0:
+              command: wg-quick up wg0
+            02_configure_wg0_service:
+              command: systemctl enable wg-quick@wg0
+        configure_traffic_forwarding:
+          commands:
+            01_allow_traffic_forwarding:
+              command: echo "net.ipv4.ip_forward=1" > /etc/sysctl.conf
+            02_apply_kernel_changes:
+              command: sysctl -p
+    Properties:
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyName
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - Ref: VPNServerSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+
+          yum update -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v \
+            --stack ${AWS::StackName} \
+            --resource VPNServer \
+            --configsets wireguard_install \
+            --region  ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? \
+            --stack ${AWS::StackName} \
+            --resource VPNServer \
+            --region  ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
